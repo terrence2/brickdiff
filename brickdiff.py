@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import contextlib
+import csv
 import logging
 import os.path
 import shelve
 import shutil
 from brickdiff.lib.database import Database
 from brickdiff.sources.wrapper import BrickLink
+from brickdiff.lib.brick import BrickManifest, PriceAccumulator, PriceKind
 from collections import defaultdict
 from pprint import pprint
 
@@ -41,6 +43,7 @@ def handle_init(args):
     os.makedirs(os.path.join(path, "cache", "known_colors"), 0o755, True)
     os.makedirs(os.path.join(path, "cache", "prices_new"), 0o755, True)
     os.makedirs(os.path.join(path, "cache", "prices_used"), 0o755, True)
+    os.makedirs(os.path.join(path, "cache", "supersets"), 0o755, True)
     with shelve.open(os.path.join(path, "database.shelve")) as db:
         db['db'] = Database()
 
@@ -55,6 +58,19 @@ def handle_remove(args):
     with global_state() as (bl, db):
         for set_name in args.set:
             db.remove_set(bl.get_set(set_name))
+
+
+def handle_list(args):
+    with global_state() as (bl, db):
+        if args.sets:
+            for lego_set_list in db.sets.values():
+                for lego_set in lego_set_list:
+                    print(lego_set)
+
+        if args.bricks:
+            sort_key = lambda p: p.brick.part.name
+            for brick_pile in sorted(db.bricks.values(), key=sort_key):
+                print(brick_pile)
 
 
 def handle_info(args):
@@ -79,17 +95,13 @@ def handle_info(args):
             print(brick.info(prices))
 
 
-def handle_list(args):
+def handle_superset(args):
     with global_state() as (bl, db):
-        if args.sets:
-            for lego_set_list in db.sets.values():
-                for lego_set in lego_set_list:
-                    print(lego_set)
-
-        if args.bricks:
-            sort_key = lambda p: p.brick.part.name
-            for brick_pile in sorted(db.bricks.values(), key=sort_key):
-                print(brick_pile)
+        for brick_name in args.brick:
+            part_no, _, color_id = brick_name.partition(":")
+            brick = bl.get_brick(part_no, color_id)
+            for lego_set in bl.get_brick_supersets(brick):
+                print(str(lego_set))
 
 
 def handle_price(args):
@@ -142,8 +154,46 @@ def handle_price(args):
                 print("{} - {}: {} | {}".format(color.id, color.name, prices.new_prices, prices.used_prices))
 
 
+def handle_diff(args):
+    with global_state() as (bl, db):
+        kind = PriceKind.used if args.used else PriceKind.new
+        if args.set:
+            target_set = bl.get_set(args.set)
+            target_bom = BrickManifest.from_set(target_set)
+        elif args.bom:
+            target_bom = BrickManifest.from_csv(args.bom, bl)
+        else:
+            log.error("No target provided for diff!")
+            return
+
+        manifest = db.diff(target_bom)
+        acc = PriceAccumulator()
+        for brick_pile in manifest.piles.values():
+            prices = bl.get_brick_prices(brick_pile.brick)
+            acc.add(prices, brick_pile.quantity)
+            manifest.note_brick_cost(brick_pile.brick, prices)
+
+        sort_key = lambda p: p.average_cost(kind)
+        for brick_pile in sorted(manifest.piles.values(), key=sort_key):
+            print(brick_pile.show(kind))
+        print("Missing {} different kinds of parts, {} total bricks:".format(manifest.pile_count(),
+                                                                             manifest.brick_count()))
+        print("Likely cost to buy {} parts: {}".format(kind.name, acc.info(kind)))
+        return
+
+
+def handle_partout(args):
+    with global_state() as (bl, db):
+        if args.set:
+            lego_set = bl.get_set(args.set)
+            filename = lego_set.no + ".partout.bd.csv"
+            manifest = BrickManifest.from_set(lego_set)
+            manifest.to_csv(filename)
+            print("Wrote {} rows to {}".format(len(lego_set.brick_provisions), filename))
+
+
 def main():
-    logging.basicConfig(level='DEBUG')
+    #logging.basicConfig(level='DEBUG')
 
     main_parser = argparse.ArgumentParser(prog="brickdiff", description="Mange a LEGO database.")
     subparsers = main_parser.add_subparsers(help="sub-command help")
@@ -172,12 +222,27 @@ def main():
     info_parser.add_argument("--brick", "-b", nargs="*", type=str, default=[], help="A brick id (part:color)")
     info_parser.set_defaults(func=handle_info)
 
+    superset_parser = subparsers.add_parser('supersets', help="Find what sets a part has been used in.")
+    superset_parser.add_argument("--brick", "-b", nargs="*", type=str, default=[], help="Bricks to query")
+    superset_parser.set_defaults(func=handle_superset)
+
     price_parser = subparsers.add_parser('price', help="Find prices for things.")
     price_parser.add_argument("--part", "-p", nargs="*", default=[], help="A brick of any color")
     price_parser.add_argument("--brick", "-b", nargs="*", default=[], help="A specific brick")
     price_parser.add_argument("--set", "-s", nargs="*", default=[], help="A specific set")
     price_parser.add_argument("--set-bricks", "-S", nargs="*", default=[], help="Cost of all bricks in a set.")
     price_parser.set_defaults(func=handle_price)
+
+    diff_parser = subparsers.add_parser('diff', help="Generate missing part lists.")
+    diff_parser.add_argument("--set", "-s", type=str, help="Diff the given set against the added sets.")
+    diff_parser.add_argument("--bom", "-m", type=str, help="Diff the given BOM against the added sets.")
+    diff_parser.add_argument("--new", action="store_true", help="Diff the given set against the added sets.")
+    diff_parser.add_argument("--used", action="store_true", help="Diff the given set against the added sets.")
+    diff_parser.set_defaults(func=handle_diff)
+
+    partout_parser = subparsers.add_parser('partout', help="Generate parts lists from sets.")
+    partout_parser.add_argument("--set", "-s", type=str, help="The set to part out.")
+    partout_parser.set_defaults(func=handle_partout)
 
     args = main_parser.parse_args()
     args.func(args)

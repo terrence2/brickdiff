@@ -33,3 +33,13 @@ class Database:
         for brick_provision in set.brick_provisions:
             self.bricks[brick_provision.brick.no].remove(brick_provision.number_provided())
 
+    def diff(self, target_bom: BrickManifest) -> BrickManifest:
+        manifest = BrickManifest()
+        for pile in target_bom.piles.values():
+            if pile.brick.no not in self.bricks:
+                manifest.add_required_bricks(pile.brick, pile.quantity)
+            else:
+                available = self.bricks[pile.brick.no].quantity
+                if available < pile.quantity:
+                    manifest.add_required_bricks(pile.brick, pile.quantity - available)
+        return manifest

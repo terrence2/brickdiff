@@ -107,22 +107,31 @@ class BrickLink:
 
         return lego_set
 
+    def get_brick_supersets(self, brick: Brick) -> List[LegoSet]:
+        data = self.cached("supersets", timedelta(weeks=4), brick.no,
+                           self.client.catalog.getSupersets, "PART", brick.part.no, brick.color.id)
+        all_sets = []
+        for entry in data[0]['entries']:
+            lego_set = self.get_set(entry['item']['no'])
+            all_sets.append(lego_set)
+        return all_sets
+
     def get_all_part_colors(self, part: Part) -> List[Color]:
         data = self.cached("known_colors", timedelta(weeks=1), part.no,
                            self.client.catalog.getKnownColors, 'PART', part.no)
         return [self.get_color(item['color_id']) for item in data]
 
     def get_brick_prices(self, brick: Brick) -> Prices:
-        new_prices = self.cached("prices_new", timedelta(days=1), brick.no, self.client.catalog.getPriceGuide,
+        new_prices = self.cached("prices_new", timedelta(weeks=1), brick.no, self.client.catalog.getPriceGuide,
                                  'PART', brick.part.no, brick.color.id, None, 'N', 'Y')
-        used_prices = self.cached("prices_used", timedelta(days=1), brick.no, self.client.catalog.getPriceGuide,
+        used_prices = self.cached("prices_used", timedelta(weeks=1), brick.no, self.client.catalog.getPriceGuide,
                                   'PART', brick.part.no, brick.color.id, None, 'U', 'Y')
         return Prices(PriceGuide(new_prices), PriceGuide(used_prices))
 
     def get_set_prices(self, lego_set: LegoSet) -> PriceGuide:
-        new_prices = self.cached("prices_new", timedelta(days=1), lego_set.no, self.client.catalog.getPriceGuide,
+        new_prices = self.cached("prices_new", timedelta(weeks=1), lego_set.no, self.client.catalog.getPriceGuide,
                                  'SET', lego_set.no, None, None, 'N', 'Y')
-        used_prices = self.cached("prices_used", timedelta(days=1), lego_set.no, self.client.catalog.getPriceGuide,
+        used_prices = self.cached("prices_used", timedelta(weeks=1), lego_set.no, self.client.catalog.getPriceGuide,
                                   'SET', lego_set.no, None, None, 'U', 'Y')
         return Prices(PriceGuide(new_prices), PriceGuide(used_prices))
 

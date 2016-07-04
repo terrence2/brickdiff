@@ -1,5 +1,7 @@
+import csv
 from collections import namedtuple
 from typing import Union, Optional, List
+from enum import Enum
 from pprint import pprint
 
 
@@ -124,6 +126,53 @@ class Brick:
 {3}""".format(self, indent(self.part.info()), indent(self.color.info()), indent(prices.info(), 4))
 
 
+class PriceGuide:
+    """
+    Price statistics for an item.
+    """
+    def __init__(self, prices: dict):
+        assert prices['currency_code'] == 'USD'
+        self.is_new_or_used = prices['new_or_used'] == 'N'
+        self.min = float(prices['min_price'])
+        self.avg = float(prices['avg_price'])
+        self.max = float(prices['max_price'])
+        self.quantity = int(prices['total_quantity'])
+        self.stores_stocking = int(prices['unit_quantity'])
+
+    def show_short(self) -> str:
+        return "${0.min:.4f} - ${0.avg:.4f} - ${0.max:.4f}".format(self)
+
+    def __str__(self) -> str:
+        return "${0.min:.4f} - ${0.avg:.4f} - ${0.max:.4f} | {0.quantity} in {0.stores_stocking} stores".format(self)
+
+
+class PriceKind(Enum):
+    new = 0
+    used = 1
+
+
+class Prices:
+    """
+    Describes both new and used prices for an item.
+    """
+    def __init__(self, new_prices: PriceGuide, used_prices: PriceGuide):
+        self.prices_ = {
+            PriceKind.new: new_prices,
+            PriceKind.used: used_prices
+        }
+
+    def get(self, kind: PriceKind) -> PriceGuide:
+        return self.prices_[kind]
+
+    def info(self) -> str:
+        return "New:  {}\nUsed: {}".format(self.prices_[PriceKind.new], self.prices_[PriceKind.used])
+
+    """
+    def __str__(self) -> str:
+        return "New: {}; Used: {}".format(self.new_prices.show_short(), self.used_prices.show_short())
+    """
+
+
 class BrickPile:
     """
     A collection of lego bricks of a certain type.
@@ -142,33 +191,50 @@ class BrickPile:
         return "{:5} - {}: {}".format(self.quantity, str(self.brick), self.brick.part.name[:70])
 
 
-class PriceGuide:
-    """
-    Price statistics for an item.
-    """
-    def __init__(self, prices: dict):
-        assert prices['currency_code'] == 'USD'
-        self.is_new_or_used = prices['new_or_used'] == 'N'
-        self.min = float(prices['min_price'])
-        self.avg = float(prices['avg_price'])
-        self.max = float(prices['max_price'])
-        self.quantity = int(prices['total_quantity'])
-        self.stores_stocking = int(prices['unit_quantity'])
+class PricedBrickPile(BrickPile):
+    def __init__(self, pile: BrickPile, prices: Prices):
+        super().__init__(pile.brick, pile.quantity)
+        self.prices = prices
 
-    def __str__(self) -> str:
-        return "${0.min:.4f} - ${0.avg:.4f} - ${0.max:.4f} | {0.quantity} in {0.stores_stocking} stores".format(self)
+    def average_cost(self, kind: PriceKind):
+        return self.prices.get(kind).avg * self.quantity
+
+    def show(self, kind: PriceKind) -> str:
+        return "{0.quantity:5} - {0.brick} - ${1:6.2f} - {2}".format(self, self.average_cost(kind),
+                                                                     self.brick.part.name[:50])
 
 
-class Prices:
-    """
-    Describes both new and used prices for an item.
-    """
-    def __init__(self, new_prices: PriceGuide, used_prices: PriceGuide):
-        self.new_prices = new_prices
-        self.used_prices = used_prices
+class PriceAccumulator:
+    """This convenience class handles adding all the internal prices in one location."""
 
-    def info(self) -> str:
-        return "New:  {0.new_prices}\nUsed: {0.used_prices}".format(self)
+    class PriceGuideAccumulator:
+        def __init__(self):
+            self.min = 0
+            self.avg = 0
+            self.max = 0
+
+        def add(self, other: PriceGuide, count: int = 1):
+            self.min += other.min * count
+            self.avg += other.avg * count
+            self.max += other.max * count
+            return self
+
+        def __str__(self) -> str:
+            return "Min ${0.min:.2f} | Avg ${0.avg:.2f} | Max ${0.max:.2f}".format(self)
+
+    def __init__(self):
+        self.acc_ = {
+            PriceKind.new: self.PriceGuideAccumulator(),
+            PriceKind.used: self.PriceGuideAccumulator()
+        }
+
+    def add(self, other: Prices, count: int = 1):
+        self.acc_[PriceKind.new].add(other.get(PriceKind.new), count)
+        self.acc_[PriceKind.used].add(other.get(PriceKind.used), count)
+        return self
+
+    def info(self, kind: PriceKind) -> str:
+        return str(self.acc_[kind])
 
 
 class LegoSetBrickProvision:
@@ -219,82 +285,70 @@ class _LegoSet:
 
     def info(self, prices: Prices) -> str:
         return """Set {0.no}: {0.name}
-  Brick Count:   {2}
+  Brick Count:   {count}
   Dimensions:    {0.dimensions}
   Year Released: {0.year_released}
   Category ID:   {0.category_id}
-  New:           {1.new_prices}
-  Used:          {1.used_prices}""".format(self, prices, sum((p.number_provided() for p in self.brick_provisions)))
+  New:           {new_prices}
+  Used:          {old_prices}""".format(self,
+                                        new_prices=prices.get(PriceKind.new),
+                                        old_prices=prices.get(PriceKind.used),
+                                        count=sum((p.number_provided() for p in self.brick_provisions)))
 LegoSet = memoize(_LegoSet)
 
-'''
-class Brick:
-    def __init__(self, partno: str, element_id: str, color: Color, name: str):
-        # A unique identification (local) of this part. We'd use element_id, but those
-        # are not entirely unique, depending on lego's current binning process, apparently.
-        # In theory BL's color binning should be better at deduping.
-        self.uid = partno + '-' + str(color.bricklink_id)
 
-        # LEGO's identifier for this class of part.
-        self.partno = partno
+class BrickManifest:
+    """
+    A collection of brick piles representing brick requirements for something.
+    """
+    def __init__(self):
+        self.piles = {}
 
-        # LEGO's element identifier. May be somewhat incorrect depending on the vagaraties of how
-        # a set was parted out and when.
-        self.element_id = element_id
+    def add_required_bricks(self, brick: Brick, count: int):
+        assert brick.no not in self.piles
+        self.piles[brick.no] = BrickPile(brick, count)
 
-        # The specific color of the part.
-        self.color = color
+    def note_brick_cost(self, brick: Brick, prices: Prices):
+        """Convert a BrickPile into a PricedBrickPile."""
+        assert brick.no in self.piles
+        assert not isinstance(self.piles[brick.no], PricedBrickPile)
+        self.piles[brick.no] = PricedBrickPile(self.piles[brick.no], prices)
 
-        # The long, color independent name of the part.
-        self.name = name
+    def pile_count(self):
+        return len(self.piles)
 
-        # Any additional element ids.
-        self.alternate_element_ids = []
+    def brick_count(self):
+        acc = 0
+        for pile in self.piles.values():
+            acc += pile.quantity
+        return acc
 
-    def add_alternate_element_id(self, element_id: str):
-        assert element_id not in self.alternate_element_ids
-        self.alternate_element_ids.append(element_id)
+    @classmethod
+    def from_set(cls, lego_set: LegoSet) -> 'BrickManifest':
+        out = cls()
+        for provision in lego_set.brick_provisions:
+            out.add_required_bricks(provision.brick, provision.number_required())
+        return out
 
-    def __lt__(self, other):
-        return self.partno < other.partno
+    def to_csv(self, filename: str):
+        with open(filename, 'w+', newline='') as fp:
+            w = csv.writer(fp)
+            w.writerow("Part,Color,Num,Notes".split(","))
+            for p in sorted(self.piles.values(), key=lambda k: k.brick.part.name):
+                w.writerow([p.brick.part.no, p.brick.color.id, p.quantity,
+                            p.brick.color.name + ' - ' + p.brick.part.name])
 
-    def __hash__(self):
-        return hash(self.uid)
+    @classmethod
+    def from_csv(cls, filename: str, bl: 'BrickLink') -> 'BrickManifest':
+        out = cls()
+        with open(filename, 'r', newline='') as fp:
+            r = csv.reader(fp)
+            next(r)  # skip the header row
+            for row in r:
+                brick_no, color_id, quantity = row[:3]
+                brick = bl.get_brick(brick_no, int(color_id))
+                out.add_required_bricks(brick, int(quantity))
+        return out
 
-    def __eq__(self, other):
-        equal = self.uid == other.uid
-        if equal:
-            assert self.color == other.color
-            #assert self.name == other.name, "{} == {}".format(self.name, other.name)
-            #assert self.image_url == other.image_url, "{} == {}".format(self.image_url, other.image_url)
-        return equal
 
-    def is_usable_as(self, other) -> bool:
-        """Ignores color -- used for mode = 'any'."""
-        return other.partno == self.partno or other.name == self.name
-
-    def is_similar_to(self, other) -> bool:
-        """
-        Some parts have been redesigned and have a new number, but the same name. These are generally
-        inter-changeable.
-        """
-        # FIXME: this needs to understand what parts can be safely colorswapped at no cost... Bearings generally.
-        if other.partno == '32123':
-            assert other.name == '1/2Bush'
-            return self.partno == '32123'
-        if other.partno == '32054':
-            assert other.name == '2MFric.SnapW/CrossHole'
-            return self.partno == '32054'
-        same_with_color = (
-            (other.partno == self.partno and other.color == self.color) or  # This should be covered by __eq__
-            (other.name == self.name and other.color == self.color)
-        )
-        return same_with_color
-
-    def __str__(self):
-        return "{:>8}: {} ({})".format(self.partno, self.name, self.color)
-
-    def dump(self):
-        print(str(self))
-'''
 
